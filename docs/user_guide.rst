@@ -112,3 +112,54 @@ This is useful for:
 * Debugging packaging issues
 * Understanding wheel structure and metadata
 * Checking supported platforms and Python versions
+
+
+Rewriting Wheels
+----------------
+
+To modify one or more files in a wheel without unpacking and repacking the
+entire archive, use the ``wheel rewrite`` command::
+
+    $ wheel rewrite someproject-1.5.0-py2.py3-none-any.whl someproject/__init__.py=__version__ = '1.5.1'
+
+This replaces only the specified entries and regenerates the ``RECORD`` file
+with correct hashes. All other entries are preserved byte-for-byte, including
+their original compression and timestamps.
+
+Replacement content can be given as a string (``PATH=CONTENT``) or read from a
+file (``PATH=@FILE``). Multiple replacements can be given at once::
+
+    $ wheel rewrite someproject-1.5.0-py2.py3-none-any.whl \
+        someproject/__init__.py=@new_init.py \
+        someproject/module.py=@new_module.py
+
+By default the original wheel is overwritten in place. To write the rewritten
+wheel to a different file, use the ``--dest`` option::
+
+    $ wheel rewrite --dest someproject-1.5.1-py2.py3-none-any.whl \
+        someproject-1.5.0-py2.py3-none-any.whl \
+        someproject/__init__.py=@new_init.py
+
+The command validates all replacement targets before writing anything. If any
+target is missing, ambiguous, or has an unsafe path, the command fails without
+modifying the original wheel. The output is written to a temporary archive and
+only moved into place after every replacement has succeeded.
+
+To preserve reproducibility, the original compression and timestamps of
+unmodified entries are kept. The ``--compression`` and ``--timestamp`` options
+can be used to override these::
+
+    $ wheel rewrite --compression stored --timestamp 2020-06-15T12:30:00 \
+        someproject-1.5.0-py2.py3-none-any.whl \
+        someproject/__init__.py=@new_init.py
+
+If the wheel has embedded signature attachments (``.jws`` or ``.p7s``), they are
+invalidated by the modification. By default the command refuses to rewrite a
+signed wheel. Use the ``--remove-signatures`` option to remove the signatures
+and proceed::
+
+    $ wheel rewrite --remove-signatures someproject-1.5.0-py2.py3-none-any.whl \
+        someproject/__init__.py=@new_init.py
+
+A warning is emitted when signatures are removed. Re-sign the wheel if a valid
+signature is required.

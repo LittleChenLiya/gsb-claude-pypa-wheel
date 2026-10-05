@@ -58,6 +58,42 @@ def info_f(args: argparse.Namespace) -> None:
         raise WheelError(str(e)) from e
 
 
+def rewrite_f(args: argparse.Namespace) -> None:
+    from .rewrite import rewrite
+
+    replacements = {}
+    for spec in args.replacements:
+        if "=" not in spec:
+            raise WheelError(
+                f"Invalid replacement {spec!r}: expected PATH=CONTENT"
+            )
+        path, value = spec.split("=", 1)
+        if value.startswith("@"):
+            with open(value[1:], "rb") as f:
+                replacements[path] = f.read()
+        else:
+            replacements[path] = value
+
+    compression = None
+    if args.compression == "stored":
+        from zipfile import ZIP_STORED
+
+        compression = ZIP_STORED
+    elif args.compression == "deflated":
+        from zipfile import ZIP_DEFLATED
+
+        compression = ZIP_DEFLATED
+
+    rewrite(
+        args.wheelfile,
+        replacements,
+        dest=args.dest,
+        compression=compression,
+        timestamp=args.timestamp,
+        remove_signatures=args.remove_signatures,
+    )
+
+
 def version_f(args: argparse.Namespace) -> None:
     from .. import __version__
 
@@ -149,6 +185,48 @@ def parser() -> argparse.ArgumentParser:
         "--verbose", "-v", action="store_true", help="Show detailed file listing"
     )
     info_parser.set_defaults(func=info_f)
+
+    rewrite_parser = s.add_parser(
+        "rewrite",
+        help="Rewrite a wheel, replacing only the specified entries",
+        description=(
+            "Rewrite a wheel by replacing only the specified existing entries. "
+            "All other entries are preserved byte-for-byte and the RECORD file "
+            "is regenerated. Replacements are given as PATH=CONTENT where CONTENT "
+            "is a string, or PATH=@FILE to read replacement content from a file."
+        ),
+    )
+    rewrite_parser.add_argument("wheelfile", help="Wheel file to rewrite")
+    rewrite_parser.add_argument(
+        "replacements",
+        nargs="+",
+        metavar="PATH=CONTENT",
+        help="Entry path and new content (PATH=CONTENT), or PATH=@FILE",
+    )
+    rewrite_parser.add_argument(
+        "--dest",
+        "-d",
+        default=None,
+        help="Destination path (default: overwrite the original wheel)",
+    )
+    rewrite_parser.add_argument(
+        "--compression",
+        choices=("preserve", "stored", "deflated"),
+        default="preserve",
+        help="Compression strategy (default: preserve original)",
+    )
+    rewrite_parser.add_argument(
+        "--timestamp",
+        default=None,
+        metavar="ISO8601",
+        help="Timestamp for output entries (default: preserve original)",
+    )
+    rewrite_parser.add_argument(
+        "--remove-signatures",
+        action="store_true",
+        help="Remove embedded signature attachments (.jws/.p7s) instead of failing",
+    )
+    rewrite_parser.set_defaults(func=rewrite_f)
 
     version_parser = s.add_parser("version", help="Print version and exit")
     version_parser.set_defaults(func=version_f)
