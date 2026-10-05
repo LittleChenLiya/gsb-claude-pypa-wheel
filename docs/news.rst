@@ -3,6 +3,13 @@ Release Notes
 
 **UNRELEASED**
 
+- Changed ``wheel pack`` to verify the wheel identity explicitly before
+  publishing: the ``.dist-info`` directory name, the ``Name``/``Version``
+  fields of ``METADATA`` and the tags of ``WHEEL`` must all agree, since they
+  jointly determine the wheel file name. Directories with multiple
+  ``.dist-info`` directories, mismatched ``METADATA`` fields or conflicting
+  tags are now rejected, and the unpacked source tree is never modified, not
+  even when ``--local-version`` or ``--build-number`` change the metadata
 - Fixed ``wheel unpack`` taking the mode of the unpack directory itself from the
   archive when a wheel contains a member whose name is made up entirely of empty,
   ``.`` or ``..`` path components (such as ``../``), which let a malicious wheel
