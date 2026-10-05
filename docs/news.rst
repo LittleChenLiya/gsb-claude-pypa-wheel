@@ -3,6 +3,16 @@ Release Notes
 
 **UNRELEASED**
 
+- Added a ``wheel rewrite`` command (and ``wheel._commands.rewrite.rewrite()``
+  API) that replaces the contents of only the specified **existing** wheel
+  members and regenerates ``RECORD``, leaving every other member byte for byte
+  unchanged. All replacements are validated and read before a temporary
+  archive is built, so a failure never overwrites the target wheel; wheels that
+  carry ``RECORD.jws``/``RECORD.p7s`` signatures must be rewritten with
+  ``--drop-signatures`` (the now-invalid attachments are omitted) rather than
+  keeping a stale signature as if it were still valid. Compression and
+  timestamp handling are selected explicitly via ``--compression`` and
+  ``--timestamps``
 - Fixed ``wheel unpack`` taking the mode of the unpack directory itself from the
   archive when a wheel contains a member whose name is made up entirely of empty,
   ``.`` or ``..`` path components (such as ``../``), which let a malicious wheel

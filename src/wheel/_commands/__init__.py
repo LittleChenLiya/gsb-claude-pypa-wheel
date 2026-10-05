@@ -58,6 +58,34 @@ def info_f(args: argparse.Namespace) -> None:
         raise WheelError(str(e)) from e
 
 
+def rewrite_f(args: argparse.Namespace) -> None:
+    from .rewrite import rewrite
+
+    # Read every replacement source before opening the wheel so that a missing
+    # or unreadable file aborts the rewrite without touching the wheel at all.
+    replacements: dict[str, bytes] = {}
+    for arcname, source in args.replace:
+        if arcname in replacements:
+            raise WheelError(
+                f"Duplicate replacement specified for member {arcname!r}"
+            )
+        try:
+            with open(source, "rb") as f:
+                replacements[arcname] = f.read()
+        except OSError as e:
+            raise WheelError(f"Cannot read replacement for {arcname!r}: {e}") from e
+
+    output = rewrite(
+        args.wheelfile,
+        replacements,
+        args.output,
+        drop_signatures=args.drop_signatures,
+        compression=args.compression,
+        timestamps=args.timestamps,
+    )
+    print(output)
+
+
 def version_f(args: argparse.Namespace) -> None:
     from .. import __version__
 
@@ -79,6 +107,14 @@ Starting the tags with a "+" will append to the existing tags. Starting with a
 "-" will remove a tag (use --option=-TAG syntax). Multiple tags can be
 separated by ".". The original file will remain unless --remove is given.  The
 output filename(s) will be displayed on stdout for further processing.
+"""
+
+REWRITE_HELP = """\
+Replace the contents of one or more existing files in a wheel. Only the named
+members are changed; every other member is copied with its original contents
+unchanged, and RECORD is regenerated. The wheel is rebuilt in a temporary
+file and atomically moved into place once every replacement succeeds, so a
+failure leaves the original wheel intact and readable.
 """
 
 
@@ -149,6 +185,50 @@ def parser() -> argparse.ArgumentParser:
         "--verbose", "-v", action="store_true", help="Show detailed file listing"
     )
     info_parser.set_defaults(func=info_f)
+
+    rewrite_parser = s.add_parser(
+        "rewrite",
+        help="Replace existing files inside a wheel and regenerate RECORD",
+        description=REWRITE_HELP,
+    )
+    rewrite_parser.add_argument("wheelfile", help="Wheel file to rewrite")
+    rewrite_parser.add_argument(
+        "--replace",
+        "-r",
+        action="append",
+        nargs=2,
+        metavar=("ARCNAME", "FILE"),
+        required=True,
+        help="Replace the existing wheel member ARCNAME with the contents of "
+        "FILE. May be given multiple times; every ARCNAME must already exist "
+        "in the wheel",
+    )
+    rewrite_parser.add_argument(
+        "--output",
+        "-o",
+        help="Write the rewritten wheel to this path instead of replacing the "
+        "input wheel in place",
+    )
+    rewrite_parser.add_argument(
+        "--drop-signatures",
+        action="store_true",
+        help="Omit RECORD.jws/RECORD.p7s signature attachments; required for "
+        "signed wheels because any modification invalidates the signature",
+    )
+    rewrite_parser.add_argument(
+        "--compression",
+        choices=("preserve", "stored", "deflated"),
+        default="preserve",
+        help="Compression strategy for the archive entries (default: preserve)",
+    )
+    rewrite_parser.add_argument(
+        "--timestamps",
+        choices=("preserve", "current"),
+        default="preserve",
+        help="Timestamp strategy for the archive entries (default: preserve; "
+        "'current' honors SOURCE_DATE_EPOCH)",
+    )
+    rewrite_parser.set_defaults(func=rewrite_f)
 
     version_parser = s.add_parser("version", help="Print version and exit")
     version_parser.set_defaults(func=version_f)

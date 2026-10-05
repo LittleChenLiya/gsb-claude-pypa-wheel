@@ -32,6 +32,9 @@ Commands
   ``tags``
     Change the tags on a wheel file
 
+  ``rewrite``
+    Replace existing files inside a wheel and regenerate RECORD
+
   ``version``
     Print version and exit
 

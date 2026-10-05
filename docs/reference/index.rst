@@ -7,5 +7,6 @@ Reference Guide
    wheel_convert
    wheel_info
    wheel_pack
+   wheel_rewrite
    wheel_tags
    wheel_unpack
