@@ -3,6 +3,9 @@ Release Notes
 
 **UNRELEASED**
 
+- Added an optional ``verification_callback`` parameter to ``WheelFile`` that is
+  invoked with the member name and verification result each time a member's
+  hash check against ``RECORD`` finishes
 - Fixed ``wheel unpack`` taking the mode of the unpack directory itself from the
   archive when a wheel contains a member whose name is made up entirely of empty,
   ``.`` or ``..`` path components (such as ``../``), which let a malicious wheel

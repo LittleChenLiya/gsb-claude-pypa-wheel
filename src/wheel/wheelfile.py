@@ -10,6 +10,7 @@ import os.path
 import re
 import stat
 import time
+from collections.abc import Callable
 from io import StringIO, TextIOWrapper
 from typing import IO, TYPE_CHECKING, Literal
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -58,6 +59,14 @@ def get_zipinfo_datetime(
 class WheelFile(ZipFile):
     """A ZipFile derivative class that also reads SHA-256 hashes from
     .dist-info/RECORD and checks any read files against those.
+
+    :param verification_callback: an optional callable invoked with
+        ``(member_name, verified)`` each time the hash check for a read member
+        finishes. ``verified`` is ``True`` when the member's hash matched
+        RECORD and ``False`` when it did not. Members without a recorded hash
+        (such as RECORD itself) never trigger the callback. If the callback
+        raises while reporting a hash mismatch, the callback's exception is
+        chained from the :exc:`WheelError` that the check produced.
     """
 
     _default_algorithm = hashlib.sha256
@@ -67,12 +76,15 @@ class WheelFile(ZipFile):
         file: StrPath,
         mode: Literal["r", "w", "x", "a"] = "r",
         compression: int = ZIP_DEFLATED,
+        *,
+        verification_callback: Callable[[str, bool], None] | None = None,
     ):
         basename = os.path.basename(file)
         self.parsed_filename = WHEEL_INFO_RE.match(basename)
         if not basename.endswith(".whl") or self.parsed_filename is None:
             raise WheelError(f"Bad wheel filename {basename!r}")
 
+        self.verification_callback = verification_callback
         ZipFile.__init__(self, file, mode, compression=compression, allowZip64=True)
 
         self.dist_info_path = "{}.dist-info".format(
@@ -141,8 +153,19 @@ class WheelFile(ZipFile):
             eof = ef._eof
             update_crc_orig(newdata)
             running_hash.update(newdata)
-            if eof and running_hash.digest() != expected_hash:
-                raise WheelError(f"Hash mismatch for file '{ef_name}'")
+            if eof:
+                if running_hash.digest() != expected_hash:
+                    error = WheelError(f"Hash mismatch for file '{ef_name}'")
+                    if self.verification_callback is not None:
+                        try:
+                            self.verification_callback(ef_name, False)
+                        except Exception as callback_error:
+                            raise callback_error from error
+
+                    raise error
+
+                if self.verification_callback is not None:
+                    self.verification_callback(ef_name, True)
 
         ef_name = (
             name_or_info.filename if isinstance(name_or_info, ZipInfo) else name_or_info

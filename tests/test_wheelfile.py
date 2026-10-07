@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import stat
 import sys
 from pathlib import Path
@@ -160,6 +161,104 @@ def test_testzip_bad_hash(wheel_path: Path) -> None:
     with WheelFile(wheel_path) as wf:
         exc = pytest.raises(WheelError, wf.testzip)
         exc.match("^Hash mismatch for file 'hello/héllö.py'$")
+
+
+def test_verification_callback_success(wheel_path: Path) -> None:
+    events: list[tuple[str, bool]] = []
+    # Use a larger incompressible payload so that a partial read cannot
+    # decompress the whole member in one go
+    payload = random.Random(42).randbytes(200000)
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", payload)
+
+    with WheelFile(
+        wheel_path, verification_callback=lambda name, ok: events.append((name, ok))
+    ) as wf:
+        with wf.open("hello/héllö.py") as f:
+            # The callback must not fire before the hash check has finished
+            assert f.read(5) == payload[:5]
+            assert events == []
+            assert f.read() == payload[5:]
+
+        assert events == [("hello/héllö.py", True)]
+
+
+def test_verification_callback_repeated_reads(wheel_path: Path) -> None:
+    events: list[tuple[str, bool]] = []
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    with WheelFile(
+        wheel_path, verification_callback=lambda name, ok: events.append((name, ok))
+    ) as wf:
+        wf.read("hello/héllö.py")
+        wf.read("hello/héllö.py")
+
+    assert events == [("hello/héllö.py", True), ("hello/héllö.py", True)]
+
+
+def test_verification_callback_hash_mismatch(wheel_path: Path) -> None:
+    events: list[tuple[str, bool]] = []
+    with ZipFile(wheel_path, "w") as zf:
+        zf.writestr("hello/héllö.py", 'print("Héllö, w0rld!")\n')
+        zf.writestr(
+            "test-1.0.dist-info/RECORD",
+            "hello/héllö.py,sha256=bv-QV3RciQC2v3zL8Uvhd_arp40J5A9xmyubN34OVwo,25",
+        )
+
+    with WheelFile(
+        wheel_path, verification_callback=lambda name, ok: events.append((name, ok))
+    ) as wf:
+        exc = pytest.raises(WheelError, wf.read, "hello/héllö.py")
+        exc.match("^Hash mismatch for file 'hello/héllö.py'$")
+
+    assert events == [("hello/héllö.py", False)]
+
+
+def test_verification_callback_ignores_record(wheel_path: Path) -> None:
+    events: list[tuple[str, bool]] = []
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    with WheelFile(
+        wheel_path, verification_callback=lambda name, ok: events.append((name, ok))
+    ) as wf:
+        # RECORD (and its signature siblings) carry no hash, so reading them
+        # must not be reported as verified
+        wf.read(wf.record_path)
+        assert events == []
+        wf.read("hello/héllö.py")
+        assert events == [("hello/héllö.py", True)]
+
+
+def test_verification_callback_error_chains_read_error(wheel_path: Path) -> None:
+    callback_error = RuntimeError("callback blew up")
+    with ZipFile(wheel_path, "w") as zf:
+        zf.writestr("hello/héllö.py", 'print("Héllö, w0rld!")\n')
+        zf.writestr(
+            "test-1.0.dist-info/RECORD",
+            "hello/héllö.py,sha256=bv-QV3RciQC2v3zL8Uvhd_arp40J5A9xmyubN34OVwo,25",
+        )
+
+    def callback(name: str, ok: bool) -> None:
+        raise callback_error
+
+    with WheelFile(wheel_path, verification_callback=callback) as wf:
+        exc = pytest.raises(RuntimeError, wf.read, "hello/héllö.py")
+
+    assert exc.value is callback_error
+    # The read-side WheelError is preserved as the cause of the callback error
+    assert isinstance(exc.value.__cause__, WheelError)
+    assert str(exc.value.__cause__) == "Hash mismatch for file 'hello/héllö.py'"
+
+
+def test_no_verification_callback_by_default(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    with WheelFile(wheel_path) as wf:
+        assert wf.verification_callback is None
+        assert wf.read("hello/héllö.py") == 'print("Héllö, world!")\n'.encode()
 
 
 def test_write_str(wheel_path: Path) -> None:
