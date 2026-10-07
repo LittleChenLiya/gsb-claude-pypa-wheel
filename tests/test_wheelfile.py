@@ -162,6 +162,118 @@ def test_testzip_bad_hash(wheel_path: Path) -> None:
         exc.match("^Hash mismatch for file 'hello/héllö.py'$")
 
 
+def _write_bad_hash_wheel(wheel_path: Path) -> None:
+    with ZipFile(wheel_path, "w") as zf:
+        zf.writestr("hello/héllö.py", 'print("Héllö, w0rld!")\n')
+        zf.writestr(
+            "test-1.0.dist-info/RECORD",
+            "hello/héllö.py,sha256=bv-QV3RciQC2v3zL8Uvhd_arp40J5A9xmyubN34OVwo,25",
+        )
+
+
+def test_verify_callback_success(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    notifications = []
+    with WheelFile(wheel_path, verify_callback=lambda name, ok: notifications.append((name, ok))) as wf:
+        data = wf.read("hello/héllö.py")
+        assert data == 'print("Héllö, world!")\n'.encode("utf-8")
+
+    assert notifications == [("hello/héllö.py", True)]
+
+
+def test_verify_callback_notified_after_hash_check(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    notifications = []
+    with WheelFile(wheel_path, verify_callback=lambda name, ok: notifications.append((name, ok))) as wf:
+        member = wf.open("hello/héllö.py")
+        # The callback fires only once the hash check has finished (at EOF),
+        # not when the member is opened.
+        assert notifications == []
+        member.read()
+        member.close()
+
+    assert notifications == [("hello/héllö.py", True)]
+
+
+def test_verify_callback_repeated_reads(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    notifications = []
+    with WheelFile(wheel_path, verify_callback=lambda name, ok: notifications.append((name, ok))) as wf:
+        wf.read("hello/héllö.py")
+        wf.read("hello/héllö.py")
+
+    assert notifications == [("hello/héllö.py", True), ("hello/héllö.py", True)]
+
+
+def test_verify_callback_hash_mismatch(wheel_path: Path) -> None:
+    _write_bad_hash_wheel(wheel_path)
+
+    notifications = []
+    with WheelFile(wheel_path, verify_callback=lambda name, ok: notifications.append((name, ok))) as wf:
+        exc = pytest.raises(WheelError, wf.read, "hello/héllö.py")
+        exc.match("^Hash mismatch for file 'hello/héllö.py'$")
+
+    assert notifications == [("hello/héllö.py", False)]
+
+
+def test_verify_callback_record_not_reported(wheel_path: Path) -> None:
+    # RECORD (and embedded signatures) carry no hash, so reading them must not
+    # produce a spurious "verified" notification.
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    notifications = []
+    with WheelFile(wheel_path, verify_callback=lambda name, ok: notifications.append((name, ok))) as wf:
+        record = wf.read("test-1.0.dist-info/RECORD")
+        assert b"hello/" in record
+
+    assert notifications == []
+
+
+def test_verify_callback_error_chains_hash_mismatch(wheel_path: Path) -> None:
+    _write_bad_hash_wheel(wheel_path)
+
+    def callback(name: str, verified: bool) -> None:
+        raise RuntimeError(f"callback failed for {name}")
+
+    with WheelFile(wheel_path, verify_callback=callback) as wf:
+        exc = pytest.raises(RuntimeError, wf.read, "hello/héllö.py")
+
+    exc.match("^callback failed for hello/héllö.py$")
+    # The read (hash mismatch) exception is preserved as the cause.
+    assert isinstance(exc.value.__cause__, WheelError)
+
+
+def test_verify_callback_error_on_success(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    def callback(name: str, verified: bool) -> None:
+        raise RuntimeError("callback failed")
+
+    with WheelFile(wheel_path, verify_callback=callback) as wf:
+        exc = pytest.raises(RuntimeError, wf.read, "hello/héllö.py")
+
+    exc.match("^callback failed$")
+    assert exc.value.__cause__ is None
+
+
+def test_verify_callback_not_set_by_default(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
+
+    with WheelFile(wheel_path) as wf:
+        assert wf.verify_callback is None
+        data = wf.read("hello/héllö.py")
+        assert data == 'print("Héllö, world!")\n'.encode("utf-8")
+
+
 def test_write_str(wheel_path: Path) -> None:
     with WheelFile(wheel_path, "w") as wf:
         wf.writestr("hello/héllö.py", 'print("Héllö, world!")\n')
