@@ -165,13 +165,25 @@ class WheelFile(ZipFile):
 
         return ef
 
-    def write_files(self, base_dir: str) -> None:
+    def write_files(self, base_dir: str, keep_empty_dirs: bool = False) -> None:
         log.info("creating %r and adding %r to it", self.filename, base_dir)
         deferred: list[tuple[str, str]] = []
         for root, dirnames, filenames in os.walk(base_dir):
             # Sort the directory names so that `os.walk` will walk them in a
             # defined order on the next iteration.
             dirnames.sort()
+            if keep_empty_dirs and root != base_dir and not dirnames and not filenames:
+                # This directory is empty; preserve it as a standard directory
+                # entry (a member whose name ends with "/").
+                arcname = (
+                    os.path.relpath(root, base_dir).replace(os.path.sep, "/") + "/"
+                )
+                st = os.stat(root)
+                zinfo = ZipInfo(arcname, date_time=get_zipinfo_datetime(st.st_mtime))
+                zinfo.external_attr = (stat.S_IMODE(st.st_mode) | stat.S_IFDIR) << 16
+                zinfo.compress_type = self.compression
+                self.writestr(zinfo, b"")
+
             for name in sorted(filenames):
                 path = os.path.normpath(os.path.join(root, name))
                 if os.path.isfile(path):
@@ -215,19 +227,38 @@ class WheelFile(ZipFile):
                 zinfo_or_arcname, date_time=get_zipinfo_datetime()
             )
             zinfo_or_arcname.compress_type = self.compression
-            zinfo_or_arcname.external_attr = (0o664 | stat.S_IFREG) << 16
+            if zinfo_or_arcname.filename.endswith("/"):
+                # Standard directory entry
+                zinfo_or_arcname.external_attr = (0o755 | stat.S_IFDIR) << 16
+            else:
+                zinfo_or_arcname.external_attr = (0o664 | stat.S_IFREG) << 16
 
         if isinstance(data, str):
             data = data.encode("utf-8")
 
-        ZipFile.writestr(self, zinfo_or_arcname, data, compress_type)
         fname = (
             zinfo_or_arcname.filename
             if isinstance(zinfo_or_arcname, ZipInfo)
             else zinfo_or_arcname
         )
+        if fname.endswith("/"):
+            # Directory entries carry no content, so they are recorded in
+            # RECORD without a hash or size. Their normalized name must not
+            # collide with a regular file of the same name.
+            if fname[:-1] in self._file_hashes:
+                raise WheelError(
+                    f"Directory entry {fname!r} conflicts with a file of the same name"
+                )
+        elif fname != self.record_path and fname + "/" in self._file_hashes:
+            raise WheelError(
+                f"File {fname!r} conflicts with a directory entry of the same name"
+            )
+
+        ZipFile.writestr(self, zinfo_or_arcname, data, compress_type)
         log.info("adding %r", fname)
-        if fname != self.record_path:
+        if fname.endswith("/"):
+            self._file_hashes.setdefault(fname, (None, None))
+        elif fname != self.record_path:
             hash_ = self._default_algorithm(data)
             self._file_hashes[fname] = (
                 hash_.name,
@@ -242,7 +273,9 @@ class WheelFile(ZipFile):
             writer = csv.writer(data, delimiter=",", quotechar='"', lineterminator="\n")
             writer.writerows(
                 (
-                    (fname, algorithm + "=" + hash_, self._file_sizes[fname])
+                    (fname, "", "")
+                    if algorithm is None
+                    else (fname, algorithm + "=" + hash_, self._file_sizes[fname])
                     for fname, (algorithm, hash_) in self._file_hashes.items()
                 )
             )

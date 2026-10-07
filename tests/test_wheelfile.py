@@ -229,3 +229,63 @@ def test_attributes(tmp_path_factory: TempPathFactory, wheel_path: Path) -> None
 
         info = zf.getinfo("test-1.0.dist-info/RECORD")
         assert info.external_attr == (0o664 | stat.S_IFREG) << 16
+
+
+def test_write_files_keep_empty_dirs(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    build_dir = tmp_path_factory.mktemp("build")
+    build_dir.joinpath("hello.txt").write_text("hello\n", encoding="utf-8")
+    build_dir.joinpath("empty_dir").mkdir()
+    build_dir.joinpath("nested").joinpath("empty_sub").mkdir(parents=True)
+
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write_files(str(build_dir), keep_empty_dirs=True)
+
+    with ZipFile(wheel_path, "r") as zf:
+        names = zf.namelist()
+        assert "hello.txt" in names
+        assert "empty_dir/" in names
+        assert "nested/empty_sub/" in names
+        assert zf.getinfo("empty_dir/").file_size == 0
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+
+    record_lines = sorted(line for line in record.splitlines() if line)
+    assert "empty_dir/,," in record_lines
+    assert "nested/empty_sub/,," in record_lines
+    assert any(line.startswith("hello.txt,sha256=") for line in record_lines)
+
+    # The resulting wheel must be readable and hash-checkable
+    with WheelFile(wheel_path, "r") as wf:
+        assert wf.read("hello.txt") == build_dir.joinpath("hello.txt").read_bytes()
+
+
+def test_write_files_discards_empty_dirs_by_default(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    build_dir = tmp_path_factory.mktemp("build")
+    build_dir.joinpath("hello.txt").write_text("hello\n", encoding="utf-8")
+    build_dir.joinpath("empty_dir").mkdir()
+
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write_files(str(build_dir))
+
+    with ZipFile(wheel_path, "r") as zf:
+        assert "empty_dir/" not in zf.namelist()
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+
+    assert "empty_dir" not in record
+
+
+def test_directory_entry_conflicts_with_file(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("foo", b"")
+        with pytest.raises(WheelError, match="conflicts with a file"):
+            wf.writestr("foo/", b"")
+
+
+def test_file_conflicts_with_directory_entry(wheel_path: Path) -> None:
+    with WheelFile(wheel_path, "w") as wf:
+        wf.writestr("foo/", b"")
+        with pytest.raises(WheelError, match="conflicts with a directory entry"):
+            wf.writestr("foo", b"")

@@ -21,7 +21,13 @@ def unpack_f(args: argparse.Namespace) -> None:
 def pack_f(args: argparse.Namespace) -> None:
     from .pack import pack
 
-    pack(args.directory, args.dest_dir, args.build_number, args.local_version)
+    pack(
+        args.directory,
+        args.dest_dir,
+        args.build_number,
+        args.local_version,
+        args.keep_empty_dirs,
+    )
 
 
 def convert_f(args: argparse.Namespace) -> None:
@@ -108,6 +114,12 @@ def parser() -> argparse.ArgumentParser:
     )
     repack_parser.add_argument(
         "--local-version", help="Local version identifier to add or replace"
+    )
+    repack_parser.add_argument(
+        "--keep-empty-dirs",
+        action="store_true",
+        help="Preserve empty directories as directory entries in the wheel "
+        "(default: discard them)",
     )
     repack_parser.set_defaults(func=pack_f)
 

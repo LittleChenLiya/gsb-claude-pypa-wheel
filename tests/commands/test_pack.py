@@ -255,3 +255,89 @@ def test_pack_invalid_build_tag(
     exc = exc_info.value
     assert exc.returncode == 2
     assert f"error: argument --build-number: {error}" in exc.stderr
+
+
+def _make_minimal_unpacked_wheel(unpack_dir: Path) -> None:
+    """Create a minimal unpacked wheel layout with one file and one empty dir."""
+    dist_info_dir = unpack_dir.joinpath("test-1.0.dist-info")
+    dist_info_dir.mkdir(parents=True)
+    dist_info_dir.joinpath("WHEEL").write_text(
+        "Wheel-Version: 1.0\n"
+        "Generator: test\n"
+        "Root-Is-Purelib: true\n"
+        "Tag: py3-none-any\n",
+        encoding="utf-8",
+    )
+    dist_info_dir.joinpath("METADATA").write_text(
+        "Metadata-Version: 2.1\nName: test\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    unpack_dir.joinpath("hello.txt").write_text("hello\n", encoding="utf-8")
+    unpack_dir.joinpath("empty_dir").mkdir()
+    unpack_dir.joinpath("nested").joinpath("empty_sub").mkdir(parents=True)
+
+
+@pytest.mark.filterwarnings("error:Duplicate name")
+def test_pack_keep_empty_dirs(
+    tmp_path_factory: TempPathFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pin the timestamps so that the two packs are byte-for-byte comparable
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "315532800")
+    unpack_dir = tmp_path_factory.mktemp("wheeldir")
+    _make_minimal_unpacked_wheel(unpack_dir)
+
+    dest_dir1 = tmp_path.joinpath("dest1")
+    dest_dir2 = tmp_path.joinpath("dest2")
+    dest_dir1.mkdir()
+    dest_dir2.mkdir()
+
+    run_command("pack", "--dest", dest_dir1, unpack_dir, "--keep-empty-dirs")
+    run_command("pack", "--dest", dest_dir2, unpack_dir, "--keep-empty-dirs")
+
+    wheel_path1 = dest_dir1.joinpath("test-1.0-py3-none-any.whl")
+    wheel_path2 = dest_dir2.joinpath("test-1.0-py3-none-any.whl")
+    assert wheel_path1.is_file()
+    assert wheel_path2.is_file()
+
+    # Repacking the same input must produce identical wheels
+    assert wheel_path1.read_bytes() == wheel_path2.read_bytes()
+
+    with ZipFile(wheel_path1) as zf:
+        names = zf.namelist()
+        assert "hello.txt" in names
+        assert "empty_dir/" in names
+        assert "nested/empty_sub/" in names
+        # Standard directory entries carry no content
+        assert zf.getinfo("empty_dir/").file_size == 0
+        assert zf.getinfo("nested/empty_sub/").file_size == 0
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+
+    record_lines = sorted(line for line in record.splitlines() if line)
+    # Directory entries are recorded without a hash or size
+    assert "empty_dir/,," in record_lines
+    assert "nested/empty_sub/,," in record_lines
+    # Regular files still get hashes
+    assert any(line.startswith("hello.txt,sha256=") for line in record_lines)
+    assert "test-1.0.dist-info/RECORD,," in record_lines
+
+
+@pytest.mark.filterwarnings("error:Duplicate name")
+def test_pack_discards_empty_dirs_by_default(
+    tmp_path_factory: TempPathFactory, tmp_path: Path
+) -> None:
+    unpack_dir = tmp_path_factory.mktemp("wheeldir")
+    _make_minimal_unpacked_wheel(unpack_dir)
+
+    run_command("pack", "--dest", tmp_path, unpack_dir)
+
+    wheel_path = tmp_path.joinpath("test-1.0-py3-none-any.whl")
+    assert wheel_path.is_file()
+    with ZipFile(wheel_path) as zf:
+        names = zf.namelist()
+        assert "hello.txt" in names
+        assert "empty_dir/" not in names
+        assert "nested/empty_sub/" not in names
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+
+    assert "empty_dir" not in record
+    assert "empty_sub" not in record
