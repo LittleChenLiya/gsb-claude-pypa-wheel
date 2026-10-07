@@ -3,6 +3,11 @@ Release Notes
 
 **UNRELEASED**
 
+- Added a ``--preserve-empty-dirs`` option to ``wheel pack`` (and a
+  ``preserve_empty_dirs`` argument to ``WheelFile.write_files()``) to keep empty
+  directories from the unpacked wheel as standard ZIP directory entries
+  (``/``-terminated, zero-length members); directory entries are excluded from
+  ``RECORD``, and file/directory name collisions are rejected with an error
 - Fixed ``wheel unpack`` taking the mode of the unpack directory itself from the
   archive when a wheel contains a member whose name is made up entirely of empty,
   ``.`` or ``..`` path components (such as ``../``), which let a malicious wheel

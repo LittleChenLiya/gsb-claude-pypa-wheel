@@ -30,6 +30,13 @@ Options
 
     Override the build tag in the new wheel file name.
 
+.. option:: --preserve-empty-dirs
+
+    Preserve empty directories found in the unpacked wheel as standard ZIP
+    directory entries (members whose names end with ``/``). These entries carry
+    no content and are excluded from ``RECORD``, so they have no hash or size.
+    By default empty directories are omitted, as they have always been.
+
 Examples
 --------
 

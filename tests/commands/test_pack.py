@@ -255,3 +255,75 @@ def test_pack_invalid_build_tag(
     exc = exc_info.value
     assert exc.returncode == 2
     assert f"error: argument --build-number: {error}" in exc.stderr
+
+
+def _make_unpacked_wheel_with_empty_dir(unpack_dir: Path, name: str = "empty") -> Path:
+    with ZipFile(TESTWHEEL_PATH) as zf:
+        zf.extractall(unpack_dir)
+
+    empty_dir = unpack_dir.joinpath("hello", name)
+    empty_dir.mkdir(parents=True)
+    return empty_dir
+
+
+def test_pack_preserves_empty_dirs(
+    tmp_path_factory: TempPathFactory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unpack_dir = tmp_path_factory.mktemp("wheeldir")
+    _make_unpacked_wheel_with_empty_dir(unpack_dir)
+
+    # Pin timestamps so that two repacks of identical inputs compare bytewise
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "315576060")
+    run_command("pack", "--dest", tmp_path, unpack_dir, "--preserve-empty-dirs")
+
+    wheel_path = tmp_path.joinpath("test-1.0-py2.py3-none-any.whl")
+    with ZipFile(wheel_path) as zf:
+        names = zf.namelist()
+        assert "hello/empty/" in names
+        dir_info = zf.getinfo("hello/empty/")
+        assert dir_info.file_size == 0
+
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+        assert "hello/empty/" not in record
+
+    # The directory entry can round-trip through WheelFile without a hash
+    from wheel.wheelfile import WheelFile
+
+    with WheelFile(wheel_path) as wf:
+        assert wf.read("hello/empty/") == b""
+
+
+def test_pack_empty_dirs_deterministic(
+    tmp_path_factory: TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unpack_dirs = [
+        tmp_path_factory.mktemp("wheeldir1"),
+        tmp_path_factory.mktemp("wheeldir2"),
+    ]
+    dest_dirs = [tmp_path_factory.mktemp("dest1"), tmp_path_factory.mktemp("dest2")]
+    for unpack_dir in unpack_dirs:
+        _make_unpacked_wheel_with_empty_dir(unpack_dir)
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "315576060")
+    for unpack_dir, dest_dir in zip(unpack_dirs, dest_dirs):
+        run_command("pack", "--dest", dest_dir, unpack_dir, "--preserve-empty-dirs")
+
+    wheels = [
+        dest_dir.joinpath("test-1.0-py2.py3-none-any.whl").read_bytes()
+        for dest_dir in dest_dirs
+    ]
+    assert wheels[0] == wheels[1]
+
+
+def test_pack_omits_empty_dirs_by_default(
+    tmp_path_factory: TempPathFactory, tmp_path: Path
+) -> None:
+    unpack_dir = tmp_path_factory.mktemp("wheeldir")
+    _make_unpacked_wheel_with_empty_dir(unpack_dir)
+
+    run_command("pack", "--dest", tmp_path, unpack_dir)
+    with ZipFile(tmp_path.joinpath("test-1.0-py2.py3-none-any.whl")) as zf:
+        assert "hello/empty/" not in zf.namelist()

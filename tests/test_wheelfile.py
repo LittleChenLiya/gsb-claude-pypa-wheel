@@ -3,12 +3,16 @@ from __future__ import annotations
 import stat
 import sys
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
 from pytest import MonkeyPatch, TempPathFactory
 
-from wheel.wheelfile import WheelError, WheelFile
+from wheel.wheelfile import (
+    WheelError,
+    WheelFile,
+    normalize_dir_arcname,
+)
 
 
 @pytest.fixture
@@ -229,3 +233,176 @@ def test_attributes(tmp_path_factory: TempPathFactory, wheel_path: Path) -> None
 
         info = zf.getinfo("test-1.0.dist-info/RECORD")
         assert info.external_attr == (0o664 | stat.S_IFREG) << 16
+
+
+@pytest.mark.parametrize(
+    "arcname, expected",
+    [
+        ("pkg", "pkg/"),
+        ("pkg/sub", "pkg/sub/"),
+        ("pkg/sub/", "pkg/sub/"),
+        ("pkg//sub//", "pkg/sub/"),
+        ("pkg/./sub/", "pkg/sub/"),
+        (r"pkg\sub", "pkg/sub/"),
+    ],
+)
+def test_normalize_dir_arcname(arcname: str, expected: str) -> None:
+    assert normalize_dir_arcname(arcname) == expected
+
+
+@pytest.mark.parametrize(
+    "arcname", ["", ".", "/", "/abs", "..", "../escape", "a/../../b"]
+)
+def test_normalize_dir_arcname_invalid(arcname: str) -> None:
+    with pytest.raises(WheelError, match="^Invalid directory name in wheel: "):
+        normalize_dir_arcname(arcname)
+
+
+def test_write_directory_entry(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    build_dir = tmp_path_factory.mktemp("build")
+    empty_dir = build_dir.joinpath("pkg", "data")
+    empty_dir.mkdir(parents=True)
+    init_file = build_dir.joinpath("pkg", "__init__.py")
+    init_file.write_text("", encoding="utf-8")
+
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write(str(init_file), "pkg/__init__.py")
+        wf.write_directory(str(empty_dir), "pkg/data")
+
+    with ZipFile(wheel_path, "r") as zf:
+        names = zf.namelist()
+        assert "pkg/data/" in names
+        dir_info = zf.getinfo("pkg/data/")
+        assert dir_info.file_size == 0
+        assert dir_info.compress_type == ZIP_STORED
+        assert stat.S_ISDIR(dir_info.external_attr >> 16)
+
+        # Directory entries are excluded from RECORD content hashes
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+        assert "pkg/data/" not in record
+        assert "pkg/__init__.py,sha256=" in record
+
+    # The directory entry must be readable without a hash in RECORD
+    with WheelFile(wheel_path) as wf:
+        assert wf.read("pkg/data/") == b""
+
+
+def test_write_files_preserves_empty_dirs(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    build_dir = tmp_path_factory.mktemp("build")
+    build_dir.joinpath("pkg").mkdir()
+    build_dir.joinpath("pkg", "__init__.py").write_text("", encoding="utf-8")
+    build_dir.joinpath("pkg", "empty").mkdir()
+    build_dir.joinpath("pkg", "nested").mkdir()
+    build_dir.joinpath("pkg", "nested", "deep").mkdir()
+    # An empty chain hanging off a directory that does contain a file
+    build_dir.joinpath("pkg", "withfile").mkdir()
+    build_dir.joinpath("pkg", "withfile", "sub").mkdir()
+    build_dir.joinpath("pkg", "withfile", "marker.txt").write_text("x")
+
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write_files(str(build_dir), preserve_empty_dirs=True)
+
+    with ZipFile(wheel_path, "r") as zf:
+        names = set(zf.namelist())
+        assert "pkg/empty/" in names
+        # The whole empty chain is emitted, including intermediate members
+        assert "pkg/nested/" in names
+        assert "pkg/nested/deep/" in names
+        # pkg/withfile/ itself is implied by marker.txt; only its empty
+        # descendant needs an explicit entry
+        assert "pkg/withfile/" not in names
+        assert "pkg/withfile/sub/" in names
+        record = zf.read("test-1.0.dist-info/RECORD").decode("utf-8")
+        assert "pkg/empty/" not in record
+        assert "pkg/nested/deep/" not in record
+        assert "pkg/withfile/sub/" not in record
+
+
+def test_write_files_empty_dirs_disabled_by_default(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    build_dir = tmp_path_factory.mktemp("build")
+    build_dir.joinpath("pkg").mkdir()
+    build_dir.joinpath("pkg", "__init__.py").write_text("", encoding="utf-8")
+    build_dir.joinpath("pkg", "empty").mkdir()
+
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write_files(str(build_dir))
+
+    with ZipFile(wheel_path, "r") as zf:
+        assert "pkg/empty/" not in zf.namelist()
+
+
+def test_empty_dir_packing_is_deterministic(
+    tmp_path_factory: TempPathFactory,
+    wheel_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    build_dirs = [tmp_path_factory.mktemp("build1"), tmp_path_factory.mktemp("build2")]
+    for build_dir in build_dirs:
+        build_dir.joinpath("pkg").mkdir()
+        build_dir.joinpath("pkg", "__init__.py").write_text("data\n", encoding="utf-8")
+        build_dir.joinpath("pkg", "zeta").mkdir()
+        build_dir.joinpath("pkg", "alpha").mkdir()
+
+    wheel_paths = [wheel_path, wheel_path.with_name("test-1.0-py2.py3-none-any-2.whl")]
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "315576060")
+    for build_dir, path in zip(build_dirs, wheel_paths):
+        with WheelFile(path, "w") as wf:
+            wf.write_files(str(build_dir), preserve_empty_dirs=True)
+
+    first, second = (path.read_bytes() for path in wheel_paths)
+    assert first == second
+
+
+def test_directory_file_name_conflict_rejected(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    def makedir() -> Path:
+        path = tmp_path_factory.mktemp("emptydir")
+        return path
+
+    # A file added after a directory entry of the same normalized name
+    empty_dir = makedir()
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write_directory(str(empty_dir), "conflict")
+        with pytest.raises(WheelError, match="^File 'conflict' conflicts"):
+            wf.writestr("conflict", "data")
+
+    # A directory entry added after a file of the same name
+    other = wheel_path.with_name("test-1.1-py2.py3-none-any.whl")
+    empty_dir_2 = makedir()
+    with WheelFile(other, "w") as wf:
+        wf.writestr("conflict", "data")
+        with pytest.raises(WheelError, match="conflicts with a file of the same name"):
+            wf.write_directory(str(empty_dir_2), "conflict/")
+
+    # Normalization must not let a trailing slash dodge the check
+    other2 = wheel_path.with_name("test-1.2-py2.py3-none-any.whl")
+    empty_dir_3 = makedir()
+    with WheelFile(other2, "w") as wf:
+        wf.write_directory(str(empty_dir_3), "thing//")
+        with pytest.raises(WheelError, match="^File 'thing' conflicts"):
+            wf.writestr("thing", "data")
+
+
+def test_duplicate_directory_entry_rejected(
+    tmp_path_factory: TempPathFactory, wheel_path: Path
+) -> None:
+    empty_dir = tmp_path_factory.mktemp("emptydir")
+    with WheelFile(wheel_path, "w") as wf:
+        wf.write_directory(str(empty_dir), "pkg/data")
+        with pytest.raises(WheelError, match="^Duplicate directory entry 'pkg/data/'"):
+            wf.write_directory(str(empty_dir), "pkg/data//")
+
+
+def test_writestr_directory_name_rejected(wheel_path: Path) -> None:
+    with (
+        WheelFile(wheel_path, "w") as wf,
+        pytest.raises(WheelError, match="^Use write_directory"),
+    ):
+        wf.writestr("pkg/data/", "")
